@@ -1,0 +1,10 @@
+import sys, pandas as pd
+
+#%cell GPQrL2Ad9Nds dialect=PythonDialect(); dep_refresh
+x = 1
+
+#%cell 7mt7b65sDe dialect=PythonDialect()
+y = x+2
+
+#%cell BLor2HaXQo dialect=PythonDialect()
+df = pd.DataFrame([{'a': 4, 'b': 2}]*200)
