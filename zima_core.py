@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Optional, Protocol, TypedDict, Literal
 import hashlib, os, sys, itertools, functools, cloudpickle, contextlib, pickle, pathlib, shortuuid, shutil, json, base64, polars as pl, pandas as pd, re, tempfile, pyarrow as pa, pyarrow.parquet as pq, types, subprocess, threading, ast, sqlite3, argparse, duckdb, fcntl, logging, errno, string
 
@@ -61,13 +61,15 @@ class PythonDialect(Dialect):
         locals: dict = {}
         loaded_vars: dict = {}
             
-        class VarDict:
+        class VarDict(dict):
             def __setitem__(self, name, value):
                 locals[name] = value
                 
             def __getitem__(self, name):
                 if name in locals:
                     return locals[name]
+                elif name in preamble_module.__dict__:
+                    return preamble_module.__dict__[name]
                 elif name in loaded_vars:
                     return loaded_vars[name]
                 else:
@@ -77,7 +79,7 @@ class PythonDialect(Dialect):
                         return v
                     raise KeyError(name)
 
-        exec(code, preamble_module.__dict__, VarDict()) # type: ignore
+        exec(code, VarDict()) # type: ignore
         
         if '__all__' in locals:
             created_var_names = locals['__all__'] 
@@ -133,7 +135,7 @@ class CellState:
     code_fresh: bool
     dep_fresh: bool
     var_hashes: dict[str, str]
-    
+
 def parse_cell_header(code: str) -> dict[str, str]:
     tree = ast.parse(code)
     
@@ -157,9 +159,28 @@ class CellDef:
     dialect: Dialect
     code: str
     code_hash: str
+    args_code: dict[str, str]
     dep_refresh: bool = False
     refresh_every: Optional[float] = None
+
+def unparse_args(args_code):
+    result = []
+    for k, v in args_code.items():
+        if v == 'True':
+            result.append(k)
+            continue
         
+        result.append('%s=%s' % (k, v))
+
+    return '; '.join(result)
+    
+def unparse_cell(cell: CellDef) -> str:
+    assert '\n#%cell ' not in cell.code
+
+    header = '#%%cell %s %s' % (cell.id, unparse_args(cell.args_code))
+    
+    return header + '\n' + cell.code + '\n'
+    
 def parse_cell(preamble_module, cell_text):
     cell_header, code = cell_text.split('\n', 1)
     splt = cell_header.split(None, 1)
@@ -178,7 +199,8 @@ def parse_cell(preamble_module, cell_text):
 
     code_hash = hash_string(raw_header.get('dialect', '') + '\n' + code)
     
-    return CellDef(id=cell_id, code=code, code_hash=code_hash, **header)    
+    return CellDef(id=cell_id, code=code, code_hash=code_hash,
+                   args_code=raw_header, **header)    
     
 def parse_notebook(s, data_path) -> NotebookDef:
     parts = s.split('\n#%cell ')
@@ -416,6 +438,33 @@ class Notebook:
 
         self._lock = threading.RLock()
         self.reload_notebook()
+
+    @_synchronized
+    def _update_notebook(self, cell_id, new_def: NotebookDef):
+        cells_text = [self.notebook_def.preamble_python]
+        for cell in new_def.cells.values():
+            cells_text.append(unparse_cell(cell))
+        
+        notebook_text = '\n'.join(cells_text)
+        
+        with atomic_open_for_writing(self._notebook_path) as f:
+            f.write(notebook_text)
+        
+        self.reload_notebook()
+
+    @_synchronized
+    def modify_cell_code(self, cell_id, code):
+        if cell_id not in self.notebook_def.cells:
+            raise ValueError(f"Cell with id {cell_id} not found")
+        
+        new_cell = replace(self.notebook_def.cells[cell_id],
+                           code=code)
+        
+        new_def = replace(self.notebook_def,
+            cells={**self.notebook_def.cells, cell_id: new_cell}
+        )
+        
+        self._update_notebook(cell_id, new_def)
         
     @_synchronized
     def get_cell_state(self, cell_id) -> CellState:

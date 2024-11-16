@@ -1,8 +1,9 @@
 from flask import Flask, render_template, request, jsonify, send_from_directory
 import polars as pl, pathlib
 
-def install(app, get_filename):
+def install(app, get_filename, decorator=lambda f: f):
     @app.route('/data', methods=['POST'])
+    @decorator
     def data():
         parquet_file_path = get_filename(request.args)
         # Get DataTables parameters from the request

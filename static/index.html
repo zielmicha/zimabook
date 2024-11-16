@@ -1,0 +1,29 @@
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Zima Notebook</title>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+            <script src="https://unpkg.com/morphdom@2.6.1/dist/morphdom-umd.min.js"></script>        
+            <script src="/deps/jquery-3.6.0.min.js"></script>
+            <script src="/deps/jquery.dataTables.min.js"></script>
+            <script src="/static/serve_table.js"></script>
+            <script src="/static/textarea_wrapper.js"></script>
+            <style>
+                body { font-family: Arial, sans-serif; }
+                .cell { border: 3px solid #ddd; margin: 10px 0; padding: 10px; }
+                .cell-id { font-weight: bold; }
+                pre { background-color: #f0f0f0; padding: 10px; }
+                .variables { margin-top: 20px; }
+                .variable { margin-bottom: 5px; }
+                .cell-state { margin-top: 10px; font-style: italic; }
+                .code-editor { width: 100%; height: 100px; }
+		.cell.focused { border: 3px solid green; }
+            </style>
+            <script> 
+            </script>
+        </head>
+        <body>
+          <div id="content">Loading...</div>
+	  <script src="/static/notebook.js"></script>
+        </body>
+        </html>

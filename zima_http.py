@@ -1,11 +1,13 @@
 from zima_core import Notebook, VarMeta, CellState
 import pathlib, flask, lxml.html, lxml.builder, lxml.etree, urllib.parse
-import serve_table, zima_core
+import serve_table, zima_core, token_auth
 import os
 import subprocess
 from flask_socketio import SocketIO
 import threading
 import time
+import json
+from typing import Literal
 
 class _E:
     def __getattr__(self, elem):
@@ -23,6 +25,7 @@ class _E:
             kwargs = {
                 k.replace('_', '-').rstrip('_'):v
                 for k, v in kwargs.items()
+                if v is not None
             }
             return getattr(lxml.builder.E, elem)(*real_children, **kwargs)
 
@@ -46,30 +49,52 @@ def read_log_file(log_path, max_lines=1000, max_line_length=1000):
 def run_http_server(notebook, port):
     app = flask.Flask('zima')
     socketio = SocketIO(app)
+    token_auth.install(app, socketio, app_name='zima')
 
     def get_table_filename(args):
         hash = args['hash']
         return notebook.var_storage.get_var_parquet(hash)
         
-    serve_table.install(app, get_table_filename)
+    serve_table.install(app, get_table_filename, decorator=token_auth.token_required)
     
+    # session vars
+    update_event = threading.Condition()
+    mode: Literal['command'] | Literal['edit']  = 'command'
+    current_cell_id = None
+    epoch = 0
+    
+    def _update():
+        nonlocal epoch
+        with update_event:
+            epoch += 1
+            update_event.notify_all()
+            
     def render_var(var):
         meta: VarMeta = notebook.var_storage.get_var_meta(var[2])
 
         if meta['kind'] == 'parquet':
             hash = notebook.get_var_hash(var[1])
-            return getattr(E, 'data-table')(server_url='/data?hash=' + urllib.parse.quote(hash))
+            content = getattr(E, 'data-table')(server_url='/data?hash=' + urllib.parse.quote(hash))
+        else:
+            content = notebook.var_storage.get_var_repr(var[2])
             
         return E.div(
-            f"Name: {var[1]}, Value: {notebook.var_storage.get_var_repr(var[2])}",
+            f"{var[1]} = ",
+            content,
             class_="variable"
         )
 
-    def render_log(title, path):
+    def render_log(title: Literal['pending'] | Literal['current'], path):
         data = read_log_file(path)
-        if data is not None:
-            return E.div(title, E.pre(data))
-        return E.div()
+        if data is None:
+            return E.div()
+        non_empty = data.strip()
+        log_content = E.pre(data) if non_empty else E.div()
+        
+        if title == 'pending':
+            return E.div('Pending', log_content)
+        else:
+            return log_content
     
     def render_cell(cell_id, cell, variables):
         cell_state = notebook.get_cell_state(cell_id)
@@ -82,11 +107,17 @@ def run_http_server(notebook, port):
         stale = [ name for name, is_ in freshness if not is_ ]
         freshness_html = E.div('stale', title=', '.join(stale)) if stale else 'fresh'
 
+        is_focused = cell_id == current_cell_id 
+
         return E.div(
             E.div(E.span(f"Cell ID: {cell_id}", class_="cell-id")),
-            E.pre(cell.code),
+            getattr(E, 'textarea-wrapper')(
+                text=cell.code,
+                id=f"code_{cell_id}",
+                modify_event=json.dumps({'name': 'save_code', 'params': {'cell_id': cell_id}}),
+                focus_event=json.dumps({'name': 'focus_cell', 'params': {'cell_id': cell_id}}),
+                focus='focus' if is_focused and mode == 'edit' else None),
             E.div(
-                E.div("Variables:"),
                 [render_var(var)
                  for var in variables if var[0] == cell_id],
                 class_="variables"
@@ -94,8 +125,8 @@ def run_http_server(notebook, port):
             E.div(
                 E.div("Cell State:"),
                 freshness_html,
-                render_log('Current log', cell_state.current_log),
-                render_log('Pending log', cell_state.pending_log),
+                render_log('current', cell_state.current_log),
+                render_log('pending', cell_state.pending_log),
                 class_="cell-state"
             ),
             E.button(
@@ -104,47 +135,14 @@ def run_http_server(notebook, port):
                 onclick=f"runCell('{cell_id}')"
             ),
             E.hr(),
-            class_="cell"
+            id='cell_' + cell_id,
+            **{'class': 'cell focused scroll-to' if is_focused else 'cell'},
         )
     
     @app.route('/')
+    @token_auth.token_required
     def index():
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Zima Notebook</title>
-            <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-            <script src="https://unpkg.com/morphdom@2.6.1/dist/morphdom-umd.min.js"></script>        
-            <script src="/deps/jquery-3.6.0.min.js"></script>
-            <script src="/deps/jquery.dataTables.min.js"></script>
-            <script src="/static/serve_table.js"></script>
-            <style>
-                body { font-family: Arial, sans-serif; }
-                .cell { border: 1px solid #ddd; margin: 10px 0; padding: 10px; }
-                .cell-id { font-weight: bold; }
-                pre { background-color: #f0f0f0; padding: 10px; }
-                .variables { margin-top: 20px; }
-                .variable { margin-bottom: 5px; }
-                .cell-state { margin-top: 10px; font-style: italic; }
-            </style>
-            <script>
-                const socket = io();
-                socket.on('update', function(data) {
-                    const contentElement = document.getElementById('content');
-                    morphdom(contentElement, data, {childrenOnly: true});
-                });
-
-                function runCell(cellId) {
-                    socket.emit('run_cell', {cell_id: cellId});
-                }
-            </script>
-        </head>
-        <body>
-            <div id="content">Loading...</div>
-        </body>
-        </html>
-        """
+        return flask.send_from_directory('static', 'index.html')
 
     @app.route('/deps/<path:filename>')
     def serve_deps(filename):
@@ -155,31 +153,90 @@ def run_http_server(notebook, port):
         return flask.send_from_directory('static', filename)
     
     def render_notebook():
+        nonlocal current_cell_id
         with notebook._db() as conn:
             variables = conn.execute('SELECT owner_cell, name, data_hash FROM vars').fetchall()
-    
+
+        if current_cell_id is None:
+            cell_ids = list(notebook.notebook_def.cells.keys())
+            if cell_ids:
+                current_cell_id = cell_ids[0] 
+            
         var_storage = zima_core.VarStorage(notebook._data_dir)
 
-        html = E.div(    E.h1("Zima Notebook"),
-                [
-                    render_cell(cell_id, cell, variables)
-                    for cell_id, cell in notebook.notebook_def.cells.items()
-                ]
-            )
+        html = E.div(
+            E.h1("Zima Notebook"),
+            [
+                render_cell(cell_id, cell, variables)
+                for cell_id, cell in notebook.notebook_def.cells.items()
+            ]
+        )
         
         return lxml.html.tostring(html, pretty_print=True).decode()
-
+    
     def send_updates():
         while True:
+            this_epoch = epoch
             html_content = render_notebook()
             socketio.emit('update', html_content)
-            time.sleep(1)
+            with update_event:
+                update_event.wait_for(lambda: epoch != this_epoch, timeout=1)
 
     @socketio.on('run_cell')
     def handle_run_cell(data):
         cell_id = data['cell_id']
         notebook.execute_cell(cell_id)
 
+    @socketio.on('save_code')
+    def handle_save_code(data):
+        cell_id = data['cell_id']
+        new_code = data['content']
+        notebook.modify_cell_code(cell_id, new_code)
+        socketio.emit('code_saved', {'cell_id': cell_id})
+
+        _update()
+
+    @socketio.on('focus_cell')
+    def handle_focus_cell(data):
+        nonlocal current_cell_id, mode
+        current_cell_id = data['cell_id']
+        mode = 'edit'
+        
+        _update()
+        
+    @socketio.on('loaded')
+    def handle_loaded(data):
+        print('loaded')
+        _update()
+                
+    @socketio.on('keydown')
+    def handle_keydown(data):
+        nonlocal current_cell_id, mode
+        key = data['key']
+
+        if key in ('ArrowDown', 'ArrowUp') and mode == 'command':
+            cell_ids = list(notebook.notebook_def.cells.keys())
+            try:
+                index = cell_ids.index(current_cell_id)
+            except ValueError:
+                pass
+            else:
+                index += {'ArrowDown': 1, 'ArrowUp': -1}[key]
+                if index >= 0 and index < len(cell_ids):
+                    current_cell_id = cell_ids[index]
+
+        
+        if key == 'Ctrl+Enter':
+            notebook.execute_cell(current_cell_id)
+                    
+        if key == 'Enter' and mode == 'command':
+            mode = 'edit'
+
+        if key == 'Escape' and mode == 'edit':
+            mode = 'command'
+                    
+        _update()
+                
     update_thread = threading.Thread(target=send_updates)
     update_thread.daemon = True
     update_thread.start()

@@ -1,10 +1,12 @@
 import sys, pandas as pd
 
 #%cell GPQrL2Ad9Nds dialect=PythonDialect(); dep_refresh
-x = 1
+x = 51
+# 1
 
 #%cell 7mt7b65sDe dialect=PythonDialect()
-y = x+2
+y = x+4
 
 #%cell BLor2HaXQo dialect=PythonDialect()
-df = pd.DataFrame([{'a': 4, 'b': 2}]*200)
+a = y
+df = pd.DataFrame([{'a': 6+i, 'b': a} for i in range(200)])
